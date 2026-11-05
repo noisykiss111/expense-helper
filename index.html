@@ -375,10 +375,10 @@ function shareLink() {
 
 /* ============ AI 设置（千问 / 豆包 / 其他 OpenAI 兼容接口） ============ */
 const AI_PRESETS = {
-  zhipu: { name: "智谱 GLM（免费）", endpoint: "https://open.bigmodel.cn/api/paas/v4/chat/completions", model: "glm-4.6v-flash", help: "在智谱开放平台 bigmodel.cn 注册并创建 API Key；glm-4.6v-flash 能看图，免费使用" },
   deepseek: { name: "DeepSeek", endpoint: "https://api.deepseek.com/chat/completions", model: "deepseek-flash", help: "在 DeepSeek 开放平台创建 API Key；看图要用 Flash 模型（deepseek-flash），Pro 模型不能看图" },
   qwen: { name: "通义千问（阿里云百炼）", endpoint: "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", model: "qwen-vl-plus", help: "在阿里云百炼控制台创建 API Key；模型可填 qwen-vl-plus 或 qwen-vl-max" },
   doubao: { name: "豆包（火山方舟）", endpoint: "https://ark.cn-beijing.volces.com/api/v3/chat/completions", model: "", help: "在火山方舟控制台创建 API Key，并复制一个「视觉理解」模型的 Model ID 填到模型一栏" },
+  zhipu: { name: "智谱 GLM（通过中转，免费）", endpoint: "", model: "glm-4.6v-flash", help: "接口地址填你的中转站地址（https://….workers.dev），API Key 一栏填你给中转站设的「访问码」，不是智谱的 Key" },
   custom: { name: "其他（OpenAI 兼容接口）", endpoint: "", model: "", help: "填写接口地址、模型名和 Key，模型需要支持看图" },
 };
 function loadAI() {
@@ -391,12 +391,22 @@ function loadAI() {
     } catch { S.setupBad = true; }
     history.replaceState(null, "", location.pathname + location.search);   // 把 Key 从地址栏里去掉
   }
-  if (!S.ai) S.ai = { provider: "zhipu", endpoint: AI_PRESETS.zhipu.endpoint, model: AI_PRESETS.zhipu.model, key: "" };
+  if (!S.ai || !AI_PRESETS[S.ai.provider]) S.ai = { provider: "qwen", endpoint: AI_PRESETS.qwen.endpoint, model: AI_PRESETS.qwen.model, key: "" };
+  try { S.aiAll = JSON.parse(localStorage.getItem("expense-ai-all") || "{}"); } catch { S.aiAll = {}; }
+  if (S.ai.key && !S.aiAll[S.ai.provider]) S.aiAll[S.ai.provider] = { endpoint: S.ai.endpoint, model: S.ai.model, key: S.ai.key };
 }
-function saveAI() { try { localStorage.setItem("expense-ai", JSON.stringify(S.ai)); } catch { } }
+function saveAI() {
+  if (S.ai && S.ai.provider) { S.aiAll = S.aiAll || {}; S.aiAll[S.ai.provider] = { endpoint: S.ai.endpoint, model: S.ai.model, key: S.ai.key }; }
+  try { localStorage.setItem("expense-ai", JSON.stringify(S.ai)); localStorage.setItem("expense-ai-all", JSON.stringify(S.aiAll)); } catch { }
+}
+const aiName = () => (AI_PRESETS[S.ai && S.ai.provider] || {}).name || "AI";
 const aiReady = () => !!(S.ai && S.ai.key && S.ai.endpoint && S.ai.model);
+function fullEndpoint(u) {
+  u = String(u || "").trim().replace(/\/+$/, "");
+  return /\/v\d+$/.test(u) ? u + "/chat/completions" : u;   // 只填了基础地址时，自动补上 /chat/completions
+}
 async function callAI(content, signal) {
-  const res = await fetch(S.ai.endpoint, {
+  const res = await fetch(fullEndpoint(S.ai.endpoint), {
     method: "POST", signal,
     headers: { "Content-Type": "application/json", "Authorization": "Bearer " + S.ai.key },
     body: JSON.stringify({ model: S.ai.model, temperature: 0.1, messages: [{ role: "user", content }] }),
@@ -423,7 +433,7 @@ function aiErrorText(e) {
   if (e && e.status === 400 && /image|variant|modalit/i.test(e.message || "")) return "这个模型不能看图，请在「AI 设置」换成能看图的模型";
   if (e && e.status === 402) return "账户余额不足，请先充值";
   if (e && e.status === 400) return "AI 接口拒绝了这次请求：" + (e.message || "").slice(0, 80);
-  if (e && e.name === "TypeError") return "连不上 AI 接口（网络问题，或这个接口不允许网页直接调用）";
+  if (e && e.name === "TypeError") return "连不上 AI 接口：这家 AI 不允许网页直接调用（或网络问题），请换一家试试";
   return "AI 没认出来：" + ((e && e.message) || "").slice(0, 80);
 }
 function aiForm() {
@@ -444,7 +454,11 @@ function aiForm() {
       const P = m.querySelector("#aP"), E = m.querySelector("#aE"), M = m.querySelector("#aM"), K = m.querySelector("#aK"), R = m.querySelector("#aRes");
       const help = () => { m.querySelector("#aHelp").textContent = AI_PRESETS[P.value].help; };
       help();
-      P.onchange = () => { const pr = AI_PRESETS[P.value]; if (pr.endpoint) E.value = pr.endpoint; M.value = pr.model; help(); };
+      P.onchange = () => {
+        const pr = AI_PRESETS[P.value], mine = (S.aiAll || {})[P.value];
+        E.value = (mine && mine.endpoint) || pr.endpoint; M.value = (mine && mine.model) || pr.model; K.value = (mine && mine.key) || "";
+        R.textContent = ""; help();
+      };
       const read = () => ({ provider: P.value, endpoint: E.value.trim(), model: M.value.trim(), key: K.value.trim() });
       m.querySelector("#aT").onclick = async () => {
         const old = S.ai; S.ai = read(); R.textContent = "正在测试…"; R.style.color = "";
@@ -452,7 +466,7 @@ function aiForm() {
           const c = document.createElement("canvas"); c.width = 240; c.height = 80;
           const g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, 240, 80); g.fillStyle = "#000"; g.font = "bold 40px sans-serif"; g.fillText("¥36.80", 40, 55);
           const txt = await callAI([{ type: "image_url", image_url: { url: c.toDataURL("image/png") } }, { type: "text", text: "图片里写的金额是多少？只回复数字。" }]);
-          if (/36\.8/.test(txt)) { R.textContent = "✓ 连接成功，AI 能看图识别金额"; R.style.color = "var(--ok)"; }
+          if (/36\.8/.test(txt)) { R.textContent = "✓ 连接成功，AI 能看图识别金额（已自动保存）"; R.style.color = "var(--ok)"; S.ai = read(); saveAI(); render(); return; }
           else { R.textContent = "⚠ 能连上，但 AI 没认对测试图片（回复：" + txt.slice(0, 30) + "），识别可能不准"; R.style.color = "var(--warn)"; }
         }
         catch (e) { R.textContent = "✕ " + aiErrorText(e); R.style.color = "var(--danger)"; }
@@ -730,7 +744,7 @@ function renderHome() {
       <div style="text-align:right"><div class="big">${money(sum)}</div><div class="muted">${n} 笔</div></div></div>
       <div style="margin-top:8px">${st}${t.exportedAt ? ` <span class="pill">已导出过</span>` : ""}</div></div>`;
   }).join("");
-  return `<header class="top"><h1>出差报销助手</h1><button class="ghost" data-act="ai">🤖 AI 设置${aiReady() ? "" : "（未设置）"}</button><button class="ghost" data-act="settings">⚙︎ 我的信息</button></header>
+  return `<header class="top"><h1>出差报销助手</h1><button class="ghost" data-act="ai">🤖 ${aiReady() ? "AI：" + esc(aiName()) : "AI 设置（未设置）"}</button><button class="ghost" data-act="settings">⚙︎ 我的信息</button></header>
     ${aiReady() ? "" : `<div class="banner info" style="cursor:pointer" data-act="ai">🤖 还没设置 AI 识别：设置后上传截图会自动填写金额和日期。<b>点这里设置 →</b></div>`}
     ${S.trips.length ? list : `<div class="card empty"><div class="e">🧳</div><p><b>还没有出差记录</b></p><p class="muted">出一次差建一个。出差路上随手把付款截图传上来，<br>回来以后核对一遍，一键导出报销表。</p></div>`}`;
 }
